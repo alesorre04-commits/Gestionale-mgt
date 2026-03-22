@@ -891,40 +891,63 @@ function localLoad(){ try{ const s=localStorage.getItem('tfmgr_v7'); return s?JS
 async function loadFromStorage(){
   setSyncState('syncing','connessione...');
 
-  const fbOk = initFirebase();
-
-  if(fbOk){
-    try{
-      const ref = fbDb.doc(DOC_PATH);
-      const snap = await ref.get();
-      if(snap.exists){
-        DB = snap.data();
-        if(!DB.team?.length) DB.team = [...DEFAULT_TEAM];
-        localSave(DB);
-        setSyncState('ok','Firebase ✓');
-        startRealtimeSync();
-        return;
-      } else {
-        buildSeedData();
-        await fbWrite();
-        startRealtimeSync();
-        return;
-      }
-    }catch(e){ console.warn('Firestore read error:', e); }
-  }
-
-  // Fallback: localStorage
+  // STEP 1: Carica subito da localStorage (sincrono, istantaneo)
   const local = localLoad();
-  if(local?.tr){
+  if(local && local.tr && local.tr.length){
     DB = local;
-    if(!DB.team?.length) DB.team = [...DEFAULT_TEAM];
-    setSyncState('error', isFirebaseConfigured() ? 'offline · dati locali' : '⚠️ Firebase non configurato');
-    return;
+    if(!DB.team || !DB.team.length) DB.team = [...DEFAULT_TEAM];
+    setSyncState('ok','dati locali');
+  } else {
+    // Prima volta assoluta: crea seed
+    buildSeedData();
+    localSave(DB);
+    setSyncState('ok','dati inizializzati');
   }
 
-  buildSeedData();
-  localSave(DB);
-  setSyncState('error', isFirebaseConfigured() ? 'offline · dati inizializzati' : '⚠️ Configura Firebase');
+  // STEP 2: Firebase in background (non blocca la UI)
+  const fbOk = initFirebase();
+  if(fbOk){
+    setTimeout(async()=>{
+      try{
+        const timeout = new Promise((_,rej)=>setTimeout(()=>rej(new Error('timeout')),8000));
+        const ref = fbDb.doc(DOC_PATH);
+        const snap = await Promise.race([ref.get(), timeout]);
+        if(snap && snap.exists){
+          const remote = snap.data();
+          if(remote && remote.tr && remote.tr.length){
+            DB = remote;
+            if(!DB.team || !DB.team.length) DB.team = [...DEFAULT_TEAM];
+            localSave(DB);
+          }
+          setSyncState('ok','Firebase ✓');
+          startRealtimeSync();
+          // Ricarica i profili con dati aggiornati se siamo ancora in login
+          if(!CU){
+            const banner = document.getElementById('fbSetupBanner');
+            if(banner) banner.style.display = isFirebaseConfigured() ? 'none' : 'block';
+            const up = document.getElementById('userPick');
+            if(up) up.innerHTML = DB.team.map(u=>{
+              const un=userUnread(u.id);
+              return`<div class="upick" onclick="login('${u.id}')">
+                ${un>0?`<span class="upick-badge">${un}🔔</span>`:''}
+                <div class="upick-av" style="background:${u.bg}">${u.ini}</div>
+                <div class="upick-name">${u.name}</div>
+                <div class="upick-role">${u.role}</div>
+              </div>`;
+            }).join('');
+          }
+        } else {
+          // Primo accesso Firebase: scrivi seed
+          await fbWrite();
+          setSyncState('ok','Firebase ✓');
+          startRealtimeSync();
+        }
+      }catch(e){
+        console.warn('Firebase background sync error:', e.message);
+        setSyncState('error','offline · dati locali');
+      }
+    }, 100);
+  }
 }
 
 // ── SCRITTURA SU FIRESTORE ──────────────────────────────
@@ -1878,7 +1901,7 @@ document.addEventListener('keydown',e=>{
 });
 
 // INIT
-buildLogin();
+(async()=>{ await buildLogin(); })();
 </script>
 </body>
 </html>
